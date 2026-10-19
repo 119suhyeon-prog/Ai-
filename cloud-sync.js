@@ -25,6 +25,7 @@
   meta.version = Object.assign(initialMeta().version, meta.version || {});
   meta.dirty = Object.assign(initialMeta().dirty, meta.dirty || {});
   let linked = false, busy = false, conflict = false, timer = null;
+  let lastError = false, downloadArmed = false;
   let revisions = {ets_progress:0, personal_words:0};
 
   function say(text) { const el=$cloud('cloudMessage'); if(el) el.textContent=text; }
@@ -99,7 +100,7 @@
     const button=$cloud('cloudOpen');
     if(!button) return;
     button.textContent = !session ? '☁ 로그인' : busy ? '☁ 동기화 중…' :
-      conflict ? '☁ 기록 선택 필요' : !linked ? '☁ 연결 확인 중' :
+      conflict ? '☁ 기록 선택 필요' : lastError ? '☁ 오류 확인' : !linked ? '☁ 연결 확인 중' :
       PARTS.some(p=>meta.dirty[p]) ? '☁ 저장 대기' : '☁ 동기화 완료';
     $cloud('cloudLogin').hidden=!!session;
     $cloud('cloudAccount').hidden=!session;
@@ -115,7 +116,9 @@
     if(error?.isConflict) {
       signalConflict('다른 기기의 학습기록과 충돌했습니다. 자동 덮어쓰기를 중단했습니다.');
     } else {
+      lastError = true;
       say('동기화 오류: '+(error?.message || '네트워크 오류')+' (기기 기록은 보관됨)');
+      if(!$cloud('cloudDialog').open) $cloud('cloudDialog').showModal();
     }
     refreshBadge();
   }
@@ -179,7 +182,7 @@
     if(PARTS.some(part=>existing[part])) backupCloud(existing);
     for(const part of PARTS) await writePart(part, existing[part]?.updated_at || null, true);
     meta.uid=session.user.id;meta.established=true;
-    saveMeta(); linked=true;conflict=false;
+    saveMeta(); linked=true;conflict=false;lastError=false;
     $cloud('cloudChoices').hidden=true;
     say('이 기기의 학습기록을 클라우드에 저장했습니다.');refreshBadge();
   }
@@ -189,7 +192,7 @@
     applyRemote(current);
     setBaseline(current);
     PARTS.forEach(part=>meta.dirty[part]=false);
-    saveMeta();linked=true;conflict=false;
+    saveMeta();linked=true;conflict=false;lastError=false;
     $cloud('cloudChoices').hidden=true;
     say('클라우드의 학습기록을 불러왔습니다.');refreshBadge();
   }
@@ -239,6 +242,7 @@
       }
       linked=true;
       completed=true;
+      lastError=false;
       say('최신 학습기록과 동기화됐습니다.');
     } catch(error) { fail(error); }
     finally {
@@ -278,9 +282,19 @@
   document.body.append(dialog);
   $cloud('cloudClose').onclick=()=>dialog.close();
   loginButton.onclick=()=>{refreshBadge();if(!dialog.open)dialog.showModal();};
-  $cloud('cloudBackup').onclick=backupLocal;
+  $cloud('cloudBackup').onclick=()=>{
+    try { backupLocal(); say('백업 다운로드를 요청했습니다. 파일 앱의 다운로드 폴더를 확인해 주세요.'); }
+    catch(error) { say('백업 오류: '+error.message+' 다른 기기나 기존 JSON 백업을 먼저 확인해 주세요.'); }
+  };
   $cloud('cloudLater').onclick=()=>dialog.close();
-  $cloud('cloudRefresh').onclick=sync;
+  $cloud('cloudRefresh').onclick=()=>{
+    if(conflict) {
+      $cloud('cloudChoices').hidden=false;
+      say('기록 충돌 중에는 자동 동기화가 중지됩니다. 먼저 현재 기기 기록을 백업하고 가져올 기록을 선택해 주세요.');
+      return;
+    }
+    say('동기화 요청 중입니다…');sync();
+  };
   $cloud('cloudLogin').onsubmit=async event=>{
     event.preventDefault();
     const button=event.currentTarget.querySelector('button[type="submit"]');
@@ -303,10 +317,21 @@
     say('로그아웃했습니다. 이 기기의 기록은 유지됩니다.');refreshBadge();
   };
   $cloud('cloudDownload').onclick=async()=>{
-    if(!confirm('클라우드 기록으로 이 기기의 데이터를 교체할까요? 기기 백업을 내려받았는지 확인하세요.'))return;
-    backupLocal();
-    try { await pullFromCloud();dialog.close(); }
+    const button=$cloud('cloudDownload');
+    if(!downloadArmed) {
+      downloadArmed=true;
+      button.textContent='확인 후 가져오기 (한 번 더 누르기)';
+      say('아이패드 기록이 클라우드 기록으로 교체됩니다. 위의 전체 백업 버튼으로 현재 기기 기록을 저장한 뒤, 이 버튼을 한 번 더 누르세요.');
+      return;
+    }
+    button.disabled=true;
+    say('Supabase에서 기록을 불러오는 중입니다…');
+    try { await pullFromCloud(); dialog.close(); }
     catch(error) { fail(error); }
+    finally {
+      downloadArmed=false;button.disabled=false;
+      button.textContent='클라우드 기록을 이 기기로 가져오기';
+    }
   };
   $cloud('cloudUpload').onclick=async()=>{
     if(!confirm('이 기기의 기록으로 클라우드 기록을 덮어쓸까요? 다른 기기의 학습기록이 사라질 수 있습니다.'))return;
