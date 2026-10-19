@@ -88,12 +88,28 @@
     return Object.keys(state.records || {}).length > 0 || state.history.length > 0 ||
       JSON.stringify(personalWords) !== JSON.stringify(PERSONAL_SEED);
   }
-  function applyRemote(rows) {
-    // Validate both parts before touching any local record.
-    const progress = rows.ets_progress ? validate(rows.ets_progress.payload) : null;
-    const personal = rows.personal_words ? validatePersonal(rows.personal_words.payload) : null;
-    if(progress) { state = progress; originalSave(); applySettings(); }
-    if(personal) { personalWords = personal; personalSession = null; originalSavePersonal(); }
+  function applyRemote(rows, force=false) {
+    // Avoid re-rendering unchanged rows during a background sync.
+    const updateProgress=!!rows.ets_progress && (force || rows.ets_progress.updated_at!==meta.version.ets_progress);
+    const updatePersonal=!!rows.personal_words && (force || rows.personal_words.updated_at!==meta.version.personal_words);
+    if(!updateProgress && !updatePersonal) return;
+    // Validate both sections before changing either local record.
+    const progress=updateProgress ? validate(rows.ets_progress.payload) : null;
+    const personal=updatePersonal ? validatePersonal(rows.personal_words.payload) : null;
+    if(progress) { state=progress; originalSave(); applySettings(); }
+    if(personal) {
+      personalWords=personal;
+      if(personalSession) {
+        // Preserve the current card and selected order, even if another device deleted a word.
+        const oldIds=personalSession.ids;
+        const remainingIds=new Set(personalWords.map(word=>word.id));
+        const nextId=oldIds.slice(personalSession.index).find(id=>remainingIds.has(id));
+        const keptIds=oldIds.filter(id=>remainingIds.has(id));
+        personalSession.ids=keptIds;
+        personalSession.index=nextId ? keptIds.indexOf(nextId) : keptIds.length;
+      }
+      originalSavePersonal();
+    }
     render();
   }
   function refreshBadge() {
@@ -189,7 +205,7 @@
   async function pullFromCloud() {
     const current=await fetchRows();
     if(!PARTS.every(part=>current[part])) throw new Error('클라우드 데이터가 일부 누락되어 가져올 수 없습니다.');
-    applyRemote(current);
+    applyRemote(current, true);
     setBaseline(current);
     PARTS.forEach(part=>meta.dirty[part]=false);
     saveMeta();linked=true;conflict=false;lastError=false;
