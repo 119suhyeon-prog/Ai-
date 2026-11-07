@@ -25,6 +25,7 @@
   meta.version = Object.assign(initialMeta().version, meta.version || {});
   meta.dirty = Object.assign(initialMeta().dirty, meta.dirty || {});
   let linked = false, busy = false, conflict = false, timer = null;
+  let refreshPromise = null;
   let lastError = false, downloadArmed = false;
   let revisions = {ets_progress:0, personal_words:0};
 
@@ -48,16 +49,50 @@
       body:JSON.stringify(data)
     });
     const value = await response.json().catch(() => ({}));
-    if(!response.ok) throw new Error(serverError(value, '로그인 서버 오류 ('+response.status+')'));
+    if(!response.ok) {
+      const error=new Error(serverError(value, '로그인 서버 오류 ('+response.status+')'));
+      error.status=response.status;
+      throw error;
+    }
     return value;
+  }
+  function isInvalidRefresh(error) {
+    const message=String(error?.message || '').toLowerCase();
+    return error?.status===400 &&
+      (message.includes('refresh token') || message.includes('already used'));
+  }
+  function discardExpiredLogin() {
+    session=null;linked=false;conflict=false;
+    clearTimeout(timer);saveLogin();
   }
   async function accessToken() {
     if(!session) throw new Error('로그인해 주세요.');
     if(!session.expiresAt || Date.now() > session.expiresAt-60000) {
-      const renewed = await authRequest('token?grant_type=refresh_token', {refresh_token:session.refresh_token});
-      session = Object.assign({}, renewed, {expiresAt:Date.now() + (renewed.expires_in || 3600)*1000});
-      saveLogin();
+      // Supabase refresh tokens rotate after use. Share one refresh request so
+      // simultaneous sync triggers cannot consume the same token twice.
+      if(!refreshPromise) {
+        const refreshToken=session.refresh_token;
+        refreshPromise=(async()=>{
+          try {
+            const renewed=await authRequest('token?grant_type=refresh_token', {refresh_token:refreshToken});
+            session=Object.assign({},renewed,{expiresAt:Date.now()+(renewed.expires_in||3600)*1000});
+            saveLogin();
+          } catch(error) {
+            if(isInvalidRefresh(error)) {
+              discardExpiredLogin();
+              const loginError=new Error('PC 로그인 정보가 만료되었습니다. 같은 계정으로 다시 로그인하면 휴대폰의 학습기록을 안전하게 불러옵니다.');
+              loginError.needsLogin=true;
+              throw loginError;
+            }
+            throw error;
+          } finally {
+            refreshPromise=null;
+          }
+        })();
+      }
+      await refreshPromise;
     }
+    if(!session) throw new Error('다시 로그인해 주세요. 기기의 학습기록은 그대로 보관됩니다.');
     return session.access_token;
   }
   async function rest(path, method='GET', body) {
